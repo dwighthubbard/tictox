@@ -1,0 +1,43 @@
+{% load static %}
+<!DOCTYPE html>
+<html>
+<head>
+    {% comment %}
+    <script type="text/javascript" src="{{ STATIC_URL }}admin/js/jquery.min.js"></script>
+    <script type="text/javascript" src="{{ STATIC_URL }}js/bootstrap.js"></script>
+    <link href="{{ STATIC_URL }}css/bootstrap.css" rel="stylesheet" media="screen"/>
+    {% endcomment %}
+    <link rel="stylesheet" href="http://netdna.bootstrapcdn.com/bootstrap/3.1.1/css/bootstrap.min.css">
+    <script src="http://code.jquery.com/jquery-1.11.0.min.js"></script>
+    <script src="http://netdna.bootstrapcdn.com/bootstrap/3.1.1/js/bootstrap.min.js"></script>
+
+    <meta http-equiv="refresh" content="5000">
+    <title></title>
+</head>
+<body>
+    <nav class="navbar navbar-default navbar-static-top">
+      <div class="container-fluid">
+        <p class="navbar-text">TicTox</p>
+      </div>
+    </nav>
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-md-12">
+                <div class="list-group">
+                    {% for env in envs %}
+                            <a class="list-group-item{% if env.returncode == 0 %} list-group-item-success{% elif env.returncode > 0 %} list-group-item-danger{% else %} list-group-item-info{% endif %}" data-toggle="collapse" href="#collapse_{{env.env|slugify}}" aria-expanded="false" aria-controls="collapse_{{ env.env|slugify }}">
+                                <h3 class="panel-title">{{ env.command }}</h3>
+                            </a>
+                            <div id="collapse_{{env.env|slugify}}" class="collapse">
+                                    <pre>{% for line in env.stdout %}{{ line }}
+{% endfor %}</pre>
+                            </div>
+                    {% endfor %}
+                </div>
+
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>
