@@ -1,9 +1,14 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
-import ConfigParser
+import configparser
 import curses
 import multiprocessing
 import os
+import notify2
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QPainter, QColor, QFont, QBrush
+from PyQt5.QtWidgets import QApplication, QTreeWidget, QTreeWidgetItem
+from PyQt5.uic import loadUi
 import redislite
 import redislite.patch
 import subprocess
@@ -12,22 +17,27 @@ import time
 
 
 REDIS_DB = '/tmp/tixtox.db'
+RUN_QUEUE = 'tictox:event_queue'
 
 
 def get_tox_envlist():
-    config = ConfigParser.ConfigParser()
+    config = configparser.ConfigParser()
     config.read('tox.ini')
     envlist = []
-    for en in config.get('tox', 'envlist').replace('\n', ',').strip().split(','):
+    for en in config.get(
+            'tox', 'envlist'
+    ).replace('\n', ',').strip().split(','):
         if en:
             envlist.append(en)
     return envlist
 
 
 class ToxProcess(subprocess.Popen):
+    widget = None
     def __init__(self, *args, **kwargs):
         self.redis_db = redislite.Redis('/tmp/tixtox.db')
         self.command = ' '.join(args[0])
+        self.state = 'Running'
         self.output_queue = 'tixtox:' + self.command + ':stdout'
         self.returncode_key = 'tixtox:' + self.command + ':returncode'
         super(ToxProcess, self).__init__(*args, **kwargs)
@@ -38,12 +48,18 @@ class ToxProcess(subprocess.Popen):
         # self.reader_process.join()
 
     def read_stdout(self):
-        '''The body of the tread: read lines and put them on the queue.'''
+        """
+        The body of the tread: read lines and put them on the queue.
+        """
         for item in iter(self.stdout.readline, ''):
-            for line in item.split('\n'):
-                #print('queue_write: %s' % line)
-                self.redis_db.rpush(self.output_queue, line)
-
+            if item:
+                item = item.decode('utf-8')
+                #print(item)
+                for line in item.split('\n'):
+                    #print('queue_write: %s' % line)
+                    self.redis_db.rpush(self.output_queue, line)
+            if self.returncode != None:
+                break
 
 def spawn_tox_envs(envs):
     children = []
@@ -60,38 +76,183 @@ def spawn_tox_envs(envs):
     return children
 
 
-def display_status(children, redis_db):
+def display_status(rdb, app, window, children):
+    window.treeOutput.clear()
     our_dir = os.path.dirname(__file__)
     pwd = os.getcwd()
     os.chdir(our_dir)
     os.chdir('..')
     # web_server = subprocess.Popen([sys.executable, 'manage.py', 'runserver', '127.0.0.1:8002'])
 
+    all_children = children
+
+    window.RunStatus.setText('Running')
+    count = 0
+    for child in children:
+        print('%s: %s' % (child.command, child.state))
+        tree_item = QTreeWidgetItem()
+        tree_item.setText(0, '%s: %s' % (child.command, child.state))
+        child.widget = tree_item
+        #window.treeOutput.invisibleRootItem().addChild(tree_item)
+        window.treeOutput.insertTopLevelItem(count, tree_item)
+        count += 1
+
+    window.show()
+    app.processEvents()
+
+    count = 0
     done = []
     while children:
         running = []
         for child in children:
             rc = child.poll()
-            if rc is not None:
-                redis_db.set(child.returncode_key, rc)
+            if rc or rc == 0:
+                rdb.set(child.returncode_key, rc)
                 done.append(child)
-                child.reader_process.join()
+                if rc == 0:
+                    if child.state == 'Skipped':
+                        child.widget.setBackground(0, QBrush(Qt.yellow))
+                    else:
+                        child.state = 'Ok'
+                        #child.widget.setText(0, '%s: %s' % (child.command, child.state))
+                        child.widget.setBackground(0, QBrush(Qt.green))
+                else:
+                    child.state = 'Error'
+                    child.widget.setBackground(0, QBrush(Qt.red))
+                child.widget.setText(0, '%s: %s' % (child.command, child.state))
+                print('output %s: %s' % (child.command, child.state))
+                #child.reader_process.join(1)
+                #child.reader_process.terminate()
+                for item in rdb.lrange(child.output_queue, 0, -1):
+                    item = item.decode('utf-8').strip()
+                    print('done', item)
+                    tree_item = QTreeWidgetItem()
+                    tree_item.setText(0, item)
+                    child.widget.addChild(tree_item)
+                    if rc == 0 and item.startswith('SKIPPED'):
+                        child.state = 'Skipped'
+                        child.widget.setText(0, '%s: %s' % (child.command, child.state))
+                        child.widget.setBackground(0, QBrush(Qt.yellow, Qt.Dense1Pattern))
+                    item = rdb.rpop(child.output_queue)
+                app.processEvents()
+                #child.reader_process.join()
             else:
+                #print('queue:', child.output_queue)
+                out = rdb.rpop(child.output_queue)
+                while out:
+                    out = out.decode('utf-8')
+                    if out.startswith('SKIPPED'):
+                        print('SKIPPED')
+                        child.state = 'Skipped'
+                    print('running', out)
+                    if child.widget:
+                        tree_item = QTreeWidgetItem()
+                        tree_item.setText(0, out)
+                        child.widget.addChild(tree_item)
+                        app.processEvents()
+                    out = rdb.rpop(child.output_queue)
                 running.append(child)
+            app.processEvents()
 
+        app.processEvents()
         children = running
-        time.sleep(.1)
+        #time.sleep(.1)
+        app.processEvents()
+
+    failures = []
+    for i in done:
+        if i.state in ['Error']:
+            failures.append(i.command)
+
+    window.RunStatus.setText('Idle')
+
+    if len(failures):
+        n = notify2.Notification("TicTox",
+                         'Build failed on: %s' % ','.join(failures),
+                         "notification-message-im"   # Icon name
+                        )
+        n.show()
+
+    window.hide()
+    print('Done')
     # web_server.kill()
+    os.chdir(pwd)
+
+
+def clean_keys(rdb):
+    """
+    Clean up our keys from redis
+    """
+    for key in rdb.keys('tixtox:*'):
+        rdb.delete(key)
+
+
+def enable_git_hook(hook_name=None, db_name=None, event_queue=None):
+    """
+    Create a git hook that will notify tictox when a git commit happens
+    """
+    hook_command = """#!{python_interpreter}
+import redislite
+r=redislite.Redis('{redislite_db}')
+r.rpush('{event_queue}', '{hook_name}')
+"""
+    if not hook_name:
+        hook_name = 'post-commit'
+
+    if not db_name:
+        db_name = '/tmp/tixtox.db'
+
+    if not event_queue:
+        event_queue = RUN_QUEUE
+    context = {
+        'python_interpreter': sys.executable,
+        'redislite_db': db_name,
+        'event_queue': event_queue,
+        'hook_name': hook_name
+    }
+    with open(os.path.join('.git/hooks',hook_name), 'w') as fh:
+        fh.write(hook_command.format(**context))
+        os.fchmod(fh.fileno(), 0o0755)
+
+def remove_git_hook(hook_name=None):
+    """
+    Remove a git hook
+    """
+    if not hook_name:
+        hook_name = 'post-commit'
+    hook_file = os.path.join('.git/hooks', hook_name)
+    if os.path.exists(hook_file):
+        os.remove(hook_file)
 
 
 def main():
-    r = redislite.Redis('/tmp/tixtox.db')
-    for key in r.keys('tixtox:*'):
-        r.delete(key)
-    envs = get_tox_envlist()
-    children = spawn_tox_envs(envs)
-    display_status(children, r)
+    rdb = redislite.Redis('/tmp/tixtox.db')
+    notify2.init('TicTox')
+    app = QApplication(sys.argv)
+    ui_file = os.path.join(
+        os.path.dirname(__file__),
+        'tictox.ui'
+    )
+    window = loadUi(ui_file)
+    enable_git_hook()
+
+    while True:
+        event = rdb.rpop(RUN_QUEUE)
+        if event:
+            print('Handling event: %s' % event)
+            envs = get_tox_envlist()
+            children = spawn_tox_envs(envs)
+            display_status(rdb, app, window, children)
+        else:
+            app.processEvents()
+
+    remove_git_hook()
+    sys.exit(app.exec_())
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        remove_git_hook()
+        sys.exit(0)
