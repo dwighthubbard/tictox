@@ -2,6 +2,7 @@
 
 import configparser
 import curses
+from pep3143daemon import DaemonContext, PidFile
 import multiprocessing
 import os
 import notify2
@@ -76,7 +77,7 @@ def spawn_tox_envs(envs):
     return children
 
 
-def display_status(rdb, app, window, children):
+def display_status(rdb, app, window, children, show_window=False):
     window.treeOutput.clear()
     our_dir = os.path.dirname(__file__)
     pwd = os.getcwd()
@@ -97,7 +98,8 @@ def display_status(rdb, app, window, children):
         window.treeOutput.insertTopLevelItem(count, tree_item)
         count += 1
 
-    window.show()
+    if show_window:
+        window.show()
     app.processEvents()
 
     count = 0
@@ -131,8 +133,10 @@ def display_status(rdb, app, window, children):
                     child.widget.addChild(tree_item)
                     if rc == 0 and item.startswith('SKIPPED'):
                         child.state = 'Skipped'
-                        child.widget.setText(0, '%s: %s' % (child.command, child.state))
-                        child.widget.setBackground(0, QBrush(Qt.yellow, Qt.Dense1Pattern))
+                        child.widget.setText(
+                            0, '%s: %s' % (child.command, child.state))
+                        child.widget.setBackground(
+                            0, QBrush(Qt.yellow, Qt.Dense1Pattern))
                     item = rdb.rpop(child.output_queue)
                 app.processEvents()
                 #child.reader_process.join()
@@ -161,6 +165,8 @@ def display_status(rdb, app, window, children):
 
     failures = []
     for i in done:
+        i.reader_process.terminate()
+        i.reader_process.join()
         if i.state in ['Error']:
             failures.append(i.command)
 
@@ -240,6 +246,8 @@ def main():
         event = rdb.rpop(RUN_QUEUE)
         if event:
             print('Handling event: %s' % event)
+            if event == 'quit':
+                break
             envs = get_tox_envlist()
             children = spawn_tox_envs(envs)
             display_status(rdb, app, window, children)
@@ -251,6 +259,10 @@ def main():
 
 
 if __name__ == "__main__":
+    #pid='tixtox.pid'
+    #pidfile = PidFile(pid)
+    #daemon = DaemonContext(pidfile=pidfile)
+    #daemon.open()
     try:
         main()
     except KeyboardInterrupt:
